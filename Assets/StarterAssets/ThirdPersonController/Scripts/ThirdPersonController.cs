@@ -1,4 +1,5 @@
-﻿ using UnityEngine;
+﻿using UnityEngine;
+using System.Collections;
 #if ENABLE_INPUT_SYSTEM 
 using UnityEngine.InputSystem;
 #endif
@@ -75,6 +76,35 @@ namespace StarterAssets
         [Tooltip("For locking the camera position on all axis")]
         public bool LockCameraPosition = false;
 
+        [Header("Vaulting")]
+        [Tooltip("Distance to raycast forward when checking for vaultable obstacles")]
+        [Range(0.5f, 5.0f)]
+        public float VaultCheckDistance = 1.5f;
+
+        [Tooltip("Minimum obstacle height to vault (must be higher than step height)")]
+        public float VaultMinHeight = 0.5f;
+
+        [Tooltip("Maximum obstacle height to vault (must be lower than chest height)")]
+        public float VaultMaxHeight = 1.8f;
+
+        [Tooltip("Time in seconds to complete the vault animation")]
+        public float VaultDuration = 0.6f;
+
+        [Tooltip("How far forward the player lands after vaulting")]
+        public float VaultForwardOffset = 0.5f;
+
+        [Tooltip("Height added to obstacle top for landing position")]
+        public float VaultUpwardOffset = 0.2f;
+
+        [Tooltip("Layer mask for objects that can be vaulted")]
+        public LayerMask VaultLayers;
+
+        [Tooltip("Enable vaulting debug logs in console")]
+        public bool DebugVault = false;
+
+        [Tooltip("Enable vaulting Gizmo visualization in editor")]
+        public bool DebugVaultGizmos = false;
+
         // cinemachine
         private float _cinemachineTargetYaw;
         private float _cinemachineTargetPitch;
@@ -97,6 +127,20 @@ namespace StarterAssets
         private int _animIDJump;
         private int _animIDFreeFall;
         private int _animIDMotionSpeed;
+        private int _animIDVault;
+
+        // vault state
+        private bool _isVaulting = false;
+
+        // vault gizmo debug data
+        private Vector3 _lastVaultRayOrigin = Vector3.zero;
+        private Vector3 _lastVaultRayDirection = Vector3.zero;
+        private RaycastHit _lastVaultForwardHit;
+        private bool _lastVaultForwardHitValid = false;
+        private RaycastHit _lastVaultDownwardHit;
+        private bool _lastVaultDownwardHitValid = false;
+        private Vector3 _lastVaultLandingPosition = Vector3.zero;
+        private bool _lastVaultLandingValid = false;
 
 #if ENABLE_INPUT_SYSTEM 
         private PlayerInput _playerInput;
@@ -150,6 +194,11 @@ namespace StarterAssets
             // reset our timeouts on start
             _jumpTimeoutDelta = JumpTimeout;
             _fallTimeoutDelta = FallTimeout;
+
+            if (DebugVault)
+            {
+                Debug.Log("[VAULT DEBUG] Vault system initialized successfully!");
+            }
         }
 
         private void Update()
@@ -158,6 +207,34 @@ namespace StarterAssets
 
             JumpAndGravity();
             GroundedCheck();
+
+            /* Check for vault attempt before normal movement */
+            if (Grounded && _input.vault && !_isVaulting)
+            {
+                Vector3 vaultLandingPosition;
+                if (DebugVault)
+                {
+                    Debug.Log("[VAULT DEBUG] Vault input detected! Checking for valid landing...");
+                }
+
+                if (TryGetVaultLanding(out vaultLandingPosition))
+                {
+                    if (DebugVault)
+                    {
+                        Debug.LogError($"[VAULT DEBUG] ✓ Valid vault target found at position: {vaultLandingPosition}");
+                    }
+                    StartCoroutine(PerformVault(vaultLandingPosition));
+                    return; /* Skip normal movement this frame */
+                }
+                else
+                {
+                    if (DebugVault)
+                    {
+                        Debug.Log("[VAULT DEBUG] ✗ No valid vault target - obstacle check failed");
+                    }
+                }
+            }
+
             Move();
         }
 
@@ -173,6 +250,7 @@ namespace StarterAssets
             _animIDJump = Animator.StringToHash("Jump");
             _animIDFreeFall = Animator.StringToHash("FreeFall");
             _animIDMotionSpeed = Animator.StringToHash("MotionSpeed");
+            _animIDVault = Animator.StringToHash("Vault");
         }
 
         private void GroundedCheck()
@@ -348,6 +426,209 @@ namespace StarterAssets
             }
         }
 
+        /// <summary>
+        /// Detects if there is a valid vaultable obstacle in front of the player.
+        /// Performs multiple raycasts and collision checks to ensure safe vaulting.
+        /// </summary>
+        /// <param name="vaultLandingPosition">Output: The world position where the player should land after vaulting</param>
+        /// <returns>True if a valid vault target is found, false otherwise</returns>
+        private bool TryGetVaultLanding(out Vector3 vaultLandingPosition)
+        {
+            vaultLandingPosition = Vector3.zero;
+            _lastVaultForwardHitValid = false;
+            _lastVaultDownwardHitValid = false;
+            _lastVaultLandingValid = false;
+
+            /* Get chest height (roughly controller height * 0.7) */
+            float chestHeight = transform.position.y + (_controller.height * 0.7f);
+
+            /* Raycast forward from chest height */
+            Vector3 rayOrigin = transform.position + Vector3.up * (_controller.height * 0.7f);
+            Vector3 rayDirection = transform.forward;
+
+            _lastVaultRayOrigin = rayOrigin;
+            _lastVaultRayDirection = rayDirection;
+
+            RaycastHit hitInfo;
+            if (!Physics.Raycast(rayOrigin, rayDirection, out hitInfo, VaultCheckDistance, VaultLayers, QueryTriggerInteraction.Ignore))
+            {
+                if (DebugVault)
+                {
+                    Debug.Log("[VAULT DEBUG] Forward raycast: No obstacle found within range");
+                }
+                return false; /* No obstacle found */
+            }
+
+            _lastVaultForwardHit = hitInfo;
+            _lastVaultForwardHitValid = true;
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Forward raycast HIT: {hitInfo.collider.name} at distance {hitInfo.distance:F2}m");
+            }
+
+            /* Raycast downward from above the hit point to find obstacle top */
+            Vector3 obstacleTopSearchOrigin = hitInfo.point + Vector3.up * VaultMaxHeight;
+            RaycastHit downHit;
+            if (!Physics.Raycast(obstacleTopSearchOrigin, Vector3.down, out downHit, VaultMaxHeight, VaultLayers, QueryTriggerInteraction.Ignore))
+            {
+                if (DebugVault)
+                {
+                    Debug.Log("[VAULT DEBUG] Downward raycast: Could not find obstacle top surface");
+                }
+                return false; /* Could not find obstacle surface */
+            }
+
+            _lastVaultDownwardHit = downHit;
+            _lastVaultDownwardHitValid = true;
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Downward raycast HIT: Found obstacle top at Y={downHit.point.y:F2}");
+            }
+
+            /* Calculate obstacle height */
+            float obstacleHeight = downHit.point.y - hitInfo.point.y;
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Obstacle height: {obstacleHeight:F2}m (Min: {VaultMinHeight:F2}m, Max: {VaultMaxHeight:F2}m)");
+            }
+
+            /* Validate obstacle height is within range */
+            if (obstacleHeight < VaultMinHeight || obstacleHeight > VaultMaxHeight)
+            {
+                if (DebugVault)
+                {
+                    Debug.Log($"[VAULT DEBUG] ✗ Obstacle height OUT OF RANGE: {obstacleHeight:F2}m");
+                }
+                return false;
+            }
+
+            /* Calculate landing position: on top of obstacle + offset */
+            Vector3 landingPositionOnObstacle = downHit.point + Vector3.up * VaultUpwardOffset;
+            vaultLandingPosition = landingPositionOnObstacle + transform.forward * VaultForwardOffset;
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Landing position calculated: {vaultLandingPosition}");
+            }
+
+            /* Check if there is clear space for the capsule at landing position */
+            if (!IsCapsuleClearAtPosition(vaultLandingPosition))
+            {
+                if (DebugVault)
+                {
+                    Debug.Log("[VAULT DEBUG] ✗ Landing space blocked - capsule collision detected!");
+                }
+                return false;
+            }
+
+            _lastVaultLandingPosition = vaultLandingPosition;
+            _lastVaultLandingValid = true;
+
+            if (DebugVault)
+            {
+                Debug.Log("[VAULT DEBUG] ✓ Landing space is clear!");
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Checks if the character capsule can fit at the given position without colliding with geometry.
+        /// </summary>
+        private bool IsCapsuleClearAtPosition(Vector3 checkPosition)
+        {
+            /* Capsule overlap check at landing position */
+            Vector3 capsuleBottom = checkPosition + Vector3.up * _controller.radius;
+            Vector3 capsuleTop = checkPosition + Vector3.up * (_controller.height - _controller.radius);
+
+            Collider[] overlaps = Physics.OverlapCapsule(capsuleBottom, capsuleTop, _controller.radius, VaultLayers, QueryTriggerInteraction.Ignore);
+
+            if (DebugVault && overlaps.Length > 0)
+            {
+                Debug.Log($"[VAULT DEBUG] Capsule clearance check: {overlaps.Length} collider(s) blocking space");
+            }
+
+            /* If no overlaps, space is clear */
+            return overlaps.Length == 0;
+        }
+
+        /// <summary>
+        /// Coroutine that smoothly moves the player from current position to vault landing position.
+        /// Uses a sinusoidal arc for natural-looking movement.
+        /// </summary>
+        private IEnumerator PerformVault(Vector3 landingPosition)
+        {
+            _isVaulting = true;
+
+            if (DebugVault)
+            {
+                Debug.Log("[VAULT DEBUG] ▶ VAULT STARTED");
+            }
+
+            /* Trigger vault animation */
+            if (_hasAnimator)
+            {
+                _animator.SetTrigger(_animIDVault);
+                if (DebugVault)
+                {
+                    Debug.Log("[VAULT DEBUG] Vault animation triggered");
+                }
+            }
+
+            /* Disable CharacterController to move player manually */
+            _controller.enabled = false;
+
+            Vector3 startPosition = transform.position;
+            float elapsedTime = 0f;
+
+            while (elapsedTime < VaultDuration)
+            {
+                elapsedTime += Time.deltaTime;
+                float normalizedTime = Mathf.Clamp01(elapsedTime / VaultDuration);
+
+                /* Linear horizontal movement */
+                Vector3 horizontalPosition = Vector3.Lerp(startPosition, landingPosition, normalizedTime);
+
+                /* Sinusoidal arc for vertical movement (peak at 50% of duration) */
+                float arcHeight = Mathf.Sin(normalizedTime * Mathf.PI) * (_controller.height * 0.5f);
+                Vector3 currentPosition = horizontalPosition + Vector3.up * arcHeight;
+
+                /* Apply position */
+                transform.position = currentPosition;
+
+                if (DebugVault && normalizedTime >= 0.5f && normalizedTime < 0.51f)
+                {
+                    Debug.Log($"[VAULT DEBUG] Vault arc peak reached (50% progress)");
+                }
+
+                yield return null;
+            }
+
+            /* Ensure we end at exact landing position */
+            transform.position = landingPosition;
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Vault movement complete. Final position: {landingPosition}");
+            }
+
+            /* Re-enable CharacterController */
+            _controller.enabled = true;
+
+            /* Reset vertical velocity for gravity to work properly */
+            _verticalVelocity = 0f;
+
+            _isVaulting = false;
+
+            if (DebugVault)
+            {
+                Debug.Log("[VAULT DEBUG] ■ VAULT COMPLETED");
+            }
+        }
+
         private static float ClampAngle(float lfAngle, float lfMin, float lfMax)
         {
             if (lfAngle < -360f) lfAngle += 360f;
@@ -367,6 +648,69 @@ namespace StarterAssets
             Gizmos.DrawSphere(
                 new Vector3(transform.position.x, transform.position.y - GroundedOffset, transform.position.z),
                 GroundedRadius);
+
+            // ===== VAULT RAYCASTS VISUALIZATION =====
+            if (!DebugVaultGizmos || !_controller)
+                return;
+
+            /* Draw forward raycast origin and direction */
+            Vector3 chestRayOrigin = transform.position + Vector3.up * (_controller.height * 0.7f);
+            Vector3 chestRayEnd = chestRayOrigin + transform.forward * VaultCheckDistance;
+
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawLine(chestRayOrigin, chestRayEnd);
+            Gizmos.DrawSphere(chestRayOrigin, 0.08f);
+
+            /* Draw forward raycast hit point and normal */
+            if (_lastVaultForwardHitValid)
+            {
+                Gizmos.color = Color.green;
+                Gizmos.DrawSphere(_lastVaultForwardHit.point, 0.1f);
+                Gizmos.DrawLine(_lastVaultForwardHit.point, _lastVaultForwardHit.point + _lastVaultForwardHit.normal * 0.3f);
+            }
+
+            /* Draw downward raycast from forward hit point */
+            if (_lastVaultForwardHitValid)
+            {
+                Vector3 downRayStart = _lastVaultForwardHit.point + Vector3.up * VaultMaxHeight;
+                Vector3 downRayEnd = _lastVaultForwardHit.point - Vector3.up * 0.1f;
+
+                Gizmos.color = Color.cyan;
+                Gizmos.DrawLine(downRayStart, downRayEnd);
+                Gizmos.DrawSphere(downRayStart, 0.08f);
+            }
+
+            /* Draw downward raycast hit point (obstacle top) */
+            if (_lastVaultDownwardHitValid)
+            {
+                Gizmos.color = Color.blue;
+                Gizmos.DrawSphere(_lastVaultDownwardHit.point, 0.1f);
+            }
+
+            /* Draw landing position and capsule clearance zone */
+            if (_lastVaultLandingValid)
+            {
+                Gizmos.color = Color.magenta;
+                Gizmos.DrawSphere(_lastVaultLandingPosition, 0.15f);
+
+                /* Draw capsule at landing position */
+                Vector3 capsuleBottom = _lastVaultLandingPosition + Vector3.up * _controller.radius;
+                Vector3 capsuleTop = _lastVaultLandingPosition + Vector3.up * (_controller.height - _controller.radius);
+
+                Gizmos.color = new Color(1.0f, 0.5f, 0.0f, 1.0f); // Orange
+                Gizmos.DrawLine(capsuleBottom - Vector3.right * _controller.radius, 
+                                capsuleBottom + Vector3.right * _controller.radius);
+                Gizmos.DrawLine(capsuleBottom - Vector3.forward * _controller.radius, 
+                                capsuleBottom + Vector3.forward * _controller.radius);
+                Gizmos.DrawLine(capsuleTop - Vector3.right * _controller.radius, 
+                                capsuleTop + Vector3.right * _controller.radius);
+                Gizmos.DrawLine(capsuleTop - Vector3.forward * _controller.radius, 
+                                capsuleTop + Vector3.forward * _controller.radius);
+            }
+
+            /* Draw vault distance range indicator */
+            Gizmos.color = new Color(1.0f, 1.0f, 0.0f, 0.2f);
+            Gizmos.DrawWireSphere(transform.position + Vector3.up * (_controller.height * 0.7f), VaultCheckDistance);
         }
 
         private void OnFootstep(AnimationEvent animationEvent)
