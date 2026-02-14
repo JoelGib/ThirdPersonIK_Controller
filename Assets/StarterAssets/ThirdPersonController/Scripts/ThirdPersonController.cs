@@ -154,6 +154,7 @@ namespace StarterAssets
         private GameObject _mainCamera;
 
         private const float _threshold = 0.01f;
+        private const float _vaultMovementIntentThreshold = 0.2f;
 
         private bool _hasAnimator;
 
@@ -211,16 +212,25 @@ namespace StarterAssets
             JumpAndGravity();
             GroundedCheck();
 
-            /* Check for vault attempt before normal movement */
+            /* PATCH 1: Check for vault attempt before normal movement with movement intent validation */
             if (Grounded && _input.vault && !_isVaulting)
             {
                 Vector3 vaultLandingPosition;
+                
                 if (DebugVault)
                 {
-                    Debug.Log("[VAULT DEBUG] Vault input detected! Checking for valid landing...");
+                    Debug.Log("[VAULT DEBUG] Vault input detected! Checking movement intent and valid landing...");
                 }
 
-                if (TryGetVaultLanding(out vaultLandingPosition))
+                /* Validate that player has movement intent */
+                if (!HasVaultMovementIntent())
+                {
+                    if (DebugVault)
+                    {
+                        Debug.Log("[VAULT DEBUG] ✗ Vault input ignored - no forward movement intent");
+                    }
+                }
+                else if (TryGetVaultLanding(out vaultLandingPosition))
                 {
                     if (DebugVault)
                     {
@@ -273,6 +283,10 @@ namespace StarterAssets
 
         private void CameraRotation()
         {
+            /* PATCH 2: Skip rotation input during vault */
+            if (_isVaulting)
+                return;
+
             // if there is an input and camera position is not fixed
             if (_input.look.sqrMagnitude >= _threshold && !LockCameraPosition)
             {
@@ -294,6 +308,10 @@ namespace StarterAssets
 
         private void Move()
         {
+            /* PATCH 2: Skip movement input during vault */
+            if (_isVaulting)
+                return;
+
             // set target speed based on move speed, sprint speed and if sprint is pressed
             float targetSpeed = _input.sprint ? SprintSpeed : MoveSpeed;
 
@@ -430,6 +448,38 @@ namespace StarterAssets
         }
 
         /// <summary>
+        /// PATCH 1 - FIX: Validates that the player has movement intent toward forward direction.
+        /// Converts camera-relative input to world-space before comparing to player forward.
+        /// </summary>
+        private bool HasVaultMovementIntent()
+        {
+            /* Check if movement input has sufficient magnitude */
+            if (_input.move.magnitude < _vaultMovementIntentThreshold)
+            {
+                return false;
+            }
+
+            /* Convert camera-relative input to world-space direction */
+            Vector3 inputDirection = new Vector3(_input.move.x, 0.0f, _input.move.y).normalized;
+            Vector3 cameraForward = new Vector3(_mainCamera.transform.forward.x, 0.0f, _mainCamera.transform.forward.z).normalized;
+            Vector3 cameraRight = new Vector3(_mainCamera.transform.right.x, 0.0f, _mainCamera.transform.right.z).normalized;
+            
+            /* Construct world-space movement direction from camera-relative input */
+            Vector3 worldMoveDirection = (cameraRight * inputDirection.x + cameraForward * inputDirection.z).normalized;
+            
+            /* Check if player is moving roughly forward (within 90 degrees of forward direction) */
+            Vector3 playerForward = transform.forward;
+            float forwardAlignment = Vector3.Dot(worldMoveDirection, playerForward);
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Movement intent check - Magnitude: {_input.move.magnitude:F2}, World direction: {worldMoveDirection}, Forward alignment: {forwardAlignment:F2}");
+            }
+
+            return forwardAlignment > 0f;
+        }
+
+        /// <summary>
         /// Detects if there is a valid vaultable obstacle in front of the player.
         /// Performs multiple raycasts at different heights for robust obstacle detection.
         /// </summary>
@@ -445,6 +495,7 @@ namespace StarterAssets
 
             /* Perform multiple forward raycasts at different heights */
             RaycastHit bestHit = default;
+            float lowestHitPoint = float.MaxValue;
             bool foundObstacle = false;
 
             /* Calculate height spread for raycasts - WAIST LEVEL DETECTION */
@@ -457,7 +508,7 @@ namespace StarterAssets
                 Debug.Log($"[VAULT DEBUG] Performing {VaultRaycastCount} forward raycasts at waist level...");
             }
 
-            /* Cast multiple rays at different heights */
+            /* Cast multiple rays at different heights and find the lowest hit point (closest to ground) */
             for (int i = 0; i < VaultRaycastCount; i++)
             {
                 float heightOffset = heightMin + (i * heightStep);
@@ -477,9 +528,15 @@ namespace StarterAssets
                         foundObstacle = true;
                     }
 
+                    /* Track the lowest Y point for accurate obstacle height measurement */
+                    if (hitInfo.point.y < lowestHitPoint)
+                    {
+                        lowestHitPoint = hitInfo.point.y;
+                    }
+
                     if (DebugVault)
                     {
-                        Debug.Log($"[VAULT DEBUG] Raycast {i + 1}/{VaultRaycastCount} HIT: {hitInfo.collider.name} at distance {hitInfo.distance:F2}m (height: {heightOffset:F2})");
+                        Debug.Log($"[VAULT DEBUG] Raycast {i + 1}/{VaultRaycastCount} HIT: {hitInfo.collider.name} at distance {hitInfo.distance:F2}m (height: {heightOffset:F2}, hit Y: {hitInfo.point.y:F2})");
                     }
                 }
                 else
@@ -525,12 +582,12 @@ namespace StarterAssets
                 Debug.Log($"[VAULT DEBUG] ✓ Downward raycast HIT: Found obstacle top at Y={downHit.point.y:F2}");
             }
 
-            /* Calculate obstacle height */
-            float obstacleHeight = downHit.point.y - bestHit.point.y;
+            /* FIX: Calculate obstacle height relative to lowest hit point (closest to obstacle base) */
+            float obstacleHeight = downHit.point.y - lowestHitPoint;
 
             if (DebugVault)
             {
-                Debug.Log($"[VAULT DEBUG] Obstacle height: {obstacleHeight:F2}m (Min: {VaultMinHeight:F2}m, Max: {VaultMaxHeight:F2}m)");
+                Debug.Log($"[VAULT DEBUG] Obstacle height: {obstacleHeight:F2}m (from Y={lowestHitPoint:F2} to Y={downHit.point.y:F2}) (Min: {VaultMinHeight:F2}m, Max: {VaultMaxHeight:F2}m)");
             }
 
             /* Validate obstacle height is within range */
@@ -543,7 +600,7 @@ namespace StarterAssets
                 return false;
             }
 
-            /* Calculate landing position: on top of obstacle + offset */
+            /* PATCH 3: Calculate landing position beyond the obstacle */
             Vector3 landingPositionOnObstacle = downHit.point + Vector3.up * VaultUpwardOffset;
             vaultLandingPosition = landingPositionOnObstacle + transform.forward * VaultForwardOffset;
 
