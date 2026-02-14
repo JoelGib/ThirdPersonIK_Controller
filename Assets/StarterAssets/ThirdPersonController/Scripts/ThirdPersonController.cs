@@ -1,5 +1,6 @@
 ﻿using UnityEngine;
 using System.Collections;
+using System.Collections.Generic;
 #if ENABLE_INPUT_SYSTEM 
 using UnityEngine.InputSystem;
 #endif
@@ -99,6 +100,10 @@ namespace StarterAssets
         [Tooltip("Layer mask for objects that can be vaulted")]
         public LayerMask VaultLayers;
 
+        [Tooltip("Number of forward raycasts to perform for obstacle detection (3-5 recommended)")]
+        [Range(1, 5)]
+        public int VaultRaycastCount = 3;
+
         [Tooltip("Enable vaulting debug logs in console")]
         public bool DebugVault = false;
 
@@ -133,10 +138,8 @@ namespace StarterAssets
         private bool _isVaulting = false;
 
         // vault gizmo debug data
-        private Vector3 _lastVaultRayOrigin = Vector3.zero;
-        private Vector3 _lastVaultRayDirection = Vector3.zero;
-        private RaycastHit _lastVaultForwardHit;
-        private bool _lastVaultForwardHitValid = false;
+        private List<RaycastHit> _lastVaultForwardHits = new List<RaycastHit>();
+        private List<Vector3> _lastVaultRayOrigins = new List<Vector3>();
         private RaycastHit _lastVaultDownwardHit;
         private bool _lastVaultDownwardHitValid = false;
         private Vector3 _lastVaultLandingPosition = Vector3.zero;
@@ -428,55 +431,90 @@ namespace StarterAssets
 
         /// <summary>
         /// Detects if there is a valid vaultable obstacle in front of the player.
-        /// Performs multiple raycasts and collision checks to ensure safe vaulting.
+        /// Performs multiple raycasts at different heights for robust obstacle detection.
         /// </summary>
         /// <param name="vaultLandingPosition">Output: The world position where the player should land after vaulting</param>
         /// <returns>True if a valid vault target is found, false otherwise</returns>
         private bool TryGetVaultLanding(out Vector3 vaultLandingPosition)
         {
             vaultLandingPosition = Vector3.zero;
-            _lastVaultForwardHitValid = false;
+            _lastVaultForwardHits.Clear();
+            _lastVaultRayOrigins.Clear();
             _lastVaultDownwardHitValid = false;
             _lastVaultLandingValid = false;
 
-            /* Get chest height (roughly controller height * 0.7) */
-            float chestHeight = transform.position.y + (_controller.height * 0.7f);
+            /* Perform multiple forward raycasts at different heights */
+            RaycastHit bestHit = default;
+            bool foundObstacle = false;
 
-            /* Raycast forward from chest height */
-            Vector3 rayOrigin = transform.position + Vector3.up * (_controller.height * 0.7f);
-            Vector3 rayDirection = transform.forward;
-
-            _lastVaultRayOrigin = rayOrigin;
-            _lastVaultRayDirection = rayDirection;
-
-            RaycastHit hitInfo;
-            if (!Physics.Raycast(rayOrigin, rayDirection, out hitInfo, VaultCheckDistance, VaultLayers, QueryTriggerInteraction.Ignore))
-            {
-                if (DebugVault)
-                {
-                    Debug.Log("[VAULT DEBUG] Forward raycast: No obstacle found within range");
-                }
-                return false; /* No obstacle found */
-            }
-
-            _lastVaultForwardHit = hitInfo;
-            _lastVaultForwardHitValid = true;
+            /* Calculate height spread for raycasts - WAIST LEVEL DETECTION */
+            float heightMin = _controller.height * 0.3f;  /* Lower waist */
+            float heightMax = _controller.height * 0.65f; /* Mid-chest */
+            float heightStep = (heightMax - heightMin) / Mathf.Max(1, VaultRaycastCount - 1);
 
             if (DebugVault)
             {
-                Debug.Log($"[VAULT DEBUG] Forward raycast HIT: {hitInfo.collider.name} at distance {hitInfo.distance:F2}m");
+                Debug.Log($"[VAULT DEBUG] Performing {VaultRaycastCount} forward raycasts at waist level...");
+            }
+
+            /* Cast multiple rays at different heights */
+            for (int i = 0; i < VaultRaycastCount; i++)
+            {
+                float heightOffset = heightMin + (i * heightStep);
+                Vector3 rayOrigin = transform.position + Vector3.up * heightOffset;
+                Vector3 rayDirection = transform.forward;
+
+                _lastVaultRayOrigins.Add(rayOrigin);
+
+                RaycastHit hitInfo;
+                if (Physics.Raycast(rayOrigin, rayDirection, out hitInfo, VaultCheckDistance, VaultLayers, QueryTriggerInteraction.Ignore))
+                {
+                    _lastVaultForwardHits.Add(hitInfo);
+                    
+                    if (!foundObstacle || hitInfo.distance < bestHit.distance)
+                    {
+                        bestHit = hitInfo;
+                        foundObstacle = true;
+                    }
+
+                    if (DebugVault)
+                    {
+                        Debug.Log($"[VAULT DEBUG] Raycast {i + 1}/{VaultRaycastCount} HIT: {hitInfo.collider.name} at distance {hitInfo.distance:F2}m (height: {heightOffset:F2})");
+                    }
+                }
+                else
+                {
+                    if (DebugVault)
+                    {
+                        Debug.Log($"[VAULT DEBUG] Raycast {i + 1}/{VaultRaycastCount} miss (height: {heightOffset:F2})");
+                    }
+                }
+            }
+
+            if (!foundObstacle)
+            {
+                if (DebugVault)
+                {
+                    Debug.Log("[VAULT DEBUG] ✗ Forward raycasts: No obstacles found");
+                }
+                return false;
+            }
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] ✓ Best hit found at distance {bestHit.distance:F2}m on {bestHit.collider.name}");
             }
 
             /* Raycast downward from above the hit point to find obstacle top */
-            Vector3 obstacleTopSearchOrigin = hitInfo.point + Vector3.up * VaultMaxHeight;
+            Vector3 obstacleTopSearchOrigin = bestHit.point + Vector3.up * VaultMaxHeight;
             RaycastHit downHit;
             if (!Physics.Raycast(obstacleTopSearchOrigin, Vector3.down, out downHit, VaultMaxHeight, VaultLayers, QueryTriggerInteraction.Ignore))
             {
                 if (DebugVault)
                 {
-                    Debug.Log("[VAULT DEBUG] Downward raycast: Could not find obstacle top surface");
+                    Debug.Log("[VAULT DEBUG] ✗ Downward raycast: Could not find obstacle top surface");
                 }
-                return false; /* Could not find obstacle surface */
+                return false;
             }
 
             _lastVaultDownwardHit = downHit;
@@ -484,11 +522,11 @@ namespace StarterAssets
 
             if (DebugVault)
             {
-                Debug.Log($"[VAULT DEBUG] Downward raycast HIT: Found obstacle top at Y={downHit.point.y:F2}");
+                Debug.Log($"[VAULT DEBUG] ✓ Downward raycast HIT: Found obstacle top at Y={downHit.point.y:F2}");
             }
 
             /* Calculate obstacle height */
-            float obstacleHeight = downHit.point.y - hitInfo.point.y;
+            float obstacleHeight = downHit.point.y - bestHit.point.y;
 
             if (DebugVault)
             {
@@ -653,36 +691,45 @@ namespace StarterAssets
             if (!DebugVaultGizmos || !_controller)
                 return;
 
-            /* Draw forward raycast origin and direction */
-            Vector3 chestRayOrigin = transform.position + Vector3.up * (_controller.height * 0.7f);
-            Vector3 chestRayEnd = chestRayOrigin + transform.forward * VaultCheckDistance;
+            /* Draw all forward raycasts at different heights */
+            float heightMin = _controller.height * 0.5f;
+            float heightMax = _controller.height * 0.85f;
+            float heightStep = (heightMax - heightMin) / Mathf.Max(1, VaultRaycastCount - 1);
 
-            Gizmos.color = Color.yellow;
-            Gizmos.DrawLine(chestRayOrigin, chestRayEnd);
-            Gizmos.DrawSphere(chestRayOrigin, 0.08f);
-
-            /* Draw forward raycast hit point and normal */
-            if (_lastVaultForwardHitValid)
+            for (int i = 0; i < VaultRaycastCount; i++)
             {
-                Gizmos.color = Color.green;
-                Gizmos.DrawSphere(_lastVaultForwardHit.point, 0.1f);
-                Gizmos.DrawLine(_lastVaultForwardHit.point, _lastVaultForwardHit.point + _lastVaultForwardHit.normal * 0.3f);
+                float heightOffset = heightMin + (i * heightStep);
+                Vector3 rayOrigin = transform.position + Vector3.up * heightOffset;
+                Vector3 rayEnd = rayOrigin + transform.forward * VaultCheckDistance;
+
+                /* Color code: brighter yellow for center raycasts */
+                float colorLerp = VaultRaycastCount > 1 ? i / (float)(VaultRaycastCount - 1) : 0.5f;
+                Color rayColor = Color.Lerp(new Color(0.8f, 0.8f, 0f, 1f), new Color(1f, 1f, 0f, 1f), colorLerp);
+
+                Gizmos.color = rayColor;
+                Gizmos.DrawLine(rayOrigin, rayEnd);
+                Gizmos.DrawSphere(rayOrigin, 0.06f);
             }
 
-            /* Draw downward raycast from forward hit point */
-            if (_lastVaultForwardHitValid)
+            /* Draw hits if any */
+            for (int i = 0; i < _lastVaultForwardHits.Count; i++)
             {
-                Vector3 downRayStart = _lastVaultForwardHit.point + Vector3.up * VaultMaxHeight;
-                Vector3 downRayEnd = _lastVaultForwardHit.point - Vector3.up * 0.1f;
+                Gizmos.color = Color.green;
+                Gizmos.DrawSphere(_lastVaultForwardHits[i].point, 0.08f);
+            }
+
+            /* Draw downward raycast from best hit point */
+            if (_lastVaultDownwardHitValid)
+            {
+                RaycastHit bestHit = _lastVaultForwardHits[0];
+                Vector3 downRayStart = bestHit.point + Vector3.up * VaultMaxHeight;
+                Vector3 downRayEnd = bestHit.point - Vector3.up * 0.1f;
 
                 Gizmos.color = Color.cyan;
                 Gizmos.DrawLine(downRayStart, downRayEnd);
-                Gizmos.DrawSphere(downRayStart, 0.08f);
-            }
+                Gizmos.DrawSphere(downRayStart, 0.06f);
 
-            /* Draw downward raycast hit point (obstacle top) */
-            if (_lastVaultDownwardHitValid)
-            {
+                /* Draw downward hit point (obstacle top) */
                 Gizmos.color = Color.blue;
                 Gizmos.DrawSphere(_lastVaultDownwardHit.point, 0.1f);
             }
