@@ -110,6 +110,22 @@ namespace StarterAssets
         [Tooltip("Enable vaulting Gizmo visualization in editor")]
         public bool DebugVaultGizmos = false;
 
+        [Header("Vaulting - Advanced")]
+        [Tooltip("Maximum depth (thickness) of an obstacle to be vaultable")]
+        public float MaxVaultDepth = 2.0f;
+        
+        [Tooltip("Distance to land past the back edge of the obstacle")]
+        public float VaultLandingOffset = 0.5f;
+
+        [Header("AI")]
+        [Tooltip("Is this controller used by an enemy AI?")]
+        public bool IsEnemy = false;
+        public bool UseWorldSpaceMovement = false;
+        
+        [Header("Debug")]
+        public bool DebugMovement = false;
+
+
         // cinemachine
         private float _cinemachineTargetYaw;
         private float _cinemachineTargetPitch;
@@ -137,6 +153,9 @@ namespace StarterAssets
         // vault state
         private bool _isVaulting = false;
 
+        // jump state tracking
+        private bool _jumpInputProcessed = false;
+
         // vault gizmo debug data
         private List<RaycastHit> _lastVaultForwardHits = new List<RaycastHit>();
         private List<Vector3> _lastVaultRayOrigins = new List<Vector3>();
@@ -150,7 +169,7 @@ namespace StarterAssets
 #endif
         private Animator _animator;
         private CharacterController _controller;
-        private StarterAssetsInputs _input;
+        private IInputProvider _input;
         private GameObject _mainCamera;
 
         private const float _threshold = 0.01f;
@@ -163,7 +182,7 @@ namespace StarterAssets
             get
             {
 #if ENABLE_INPUT_SYSTEM
-                return _playerInput.currentControlScheme == "KeyboardMouse";
+                return _playerInput != null && _playerInput.currentControlScheme == "KeyboardMouse";
 #else
 				return false;
 #endif
@@ -182,15 +201,44 @@ namespace StarterAssets
 
         private void Start()
         {
-            _cinemachineTargetYaw = CinemachineCameraTarget.transform.rotation.eulerAngles.y;
+            if (CinemachineCameraTarget != null)
+                _cinemachineTargetYaw = CinemachineCameraTarget.transform.rotation.eulerAngles.y;
             
             _hasAnimator = TryGetComponent(out _animator);
             _controller = GetComponent<CharacterController>();
-            _input = GetComponent<StarterAssetsInputs>();
+            
+            // Try to get input provider - prioritize EnemyInputAI if IsEnemy is true
+            var enemyInput = GetComponent<EnemyInputAI>();
+            if (enemyInput != null)
+            {
+                _input = enemyInput;
+                IsEnemy = true; // Auto-set flag
+            }
+            else
+            {
+                _input = GetComponent<IInputProvider>();
+            }
+
+            if (_input == null)
+            {
+                _input = GetComponentInChildren<IInputProvider>();
+            }
+            if (_input == null)
+            {
+                _input = GetComponentInParent<IInputProvider>();
+            }
+            
+            if (_input == null)
+            {
+                Debug.LogError($"[ThirdPersonController] No IInputProvider found on {gameObject.name}. Attach StarterAssetsInputs or EnemyInputAI component.", gameObject);
+            }
+            else
+            {
+                Debug.Log($"[ThirdPersonController] IN USE Input Provider: {_input.GetType().Name} on {gameObject.name} (IsEnemy: {IsEnemy})");
+            }
+
 #if ENABLE_INPUT_SYSTEM 
             _playerInput = GetComponent<PlayerInput>();
-#else
-			Debug.LogError( "Starter Assets package is missing dependencies. Please use Tools/Starter Assets/Reinstall Dependencies to fix it");
 #endif
 
             AssignAnimationIDs();
@@ -207,6 +255,8 @@ namespace StarterAssets
 
         private void Update()
         {
+            if (_input == null) return;
+
             _hasAnimator = TryGetComponent(out _animator);
 
             JumpAndGravity();
@@ -253,6 +303,7 @@ namespace StarterAssets
 
         private void LateUpdate()
         {
+            if (_input == null) return;
             CameraRotation();
         }
 
@@ -283,8 +334,8 @@ namespace StarterAssets
 
         private void CameraRotation()
         {
-            /* PATCH 2: Skip rotation input during vault */
-            if (_isVaulting)
+            /* PATCH 2: Allow camera rotation during vault but skip if no camera target */
+            if (CinemachineCameraTarget == null)
                 return;
 
             // if there is an input and camera position is not fixed
@@ -302,8 +353,11 @@ namespace StarterAssets
             _cinemachineTargetPitch = ClampAngle(_cinemachineTargetPitch, BottomClamp, TopClamp);
 
             // Cinemachine will follow this target
-            CinemachineCameraTarget.transform.rotation = Quaternion.Euler(_cinemachineTargetPitch + CameraAngleOverride,
-                _cinemachineTargetYaw, 0.0f);
+            if (CinemachineCameraTarget != null)
+            {
+                CinemachineCameraTarget.transform.rotation = Quaternion.Euler(_cinemachineTargetPitch + CameraAngleOverride,
+                    _cinemachineTargetYaw, 0.0f);
+            }
         }
 
         private void Move()
@@ -315,28 +369,22 @@ namespace StarterAssets
             // set target speed based on move speed, sprint speed and if sprint is pressed
             float targetSpeed = _input.sprint ? SprintSpeed : MoveSpeed;
 
-            // a simplistic acceleration and deceleration designed to be easy to remove, replace, or iterate upon
-
-            // note: Vector2's == operator uses approximation so is not floating point error prone, and is cheaper than magnitude
             // if there is no input, set the target speed to 0
             if (_input.move == Vector2.zero) targetSpeed = 0.0f;
 
-            // a reference to the players current horizontal velocity
+            // current horizontal velocity
             float currentHorizontalSpeed = new Vector3(_controller.velocity.x, 0.0f, _controller.velocity.z).magnitude;
 
             float speedOffset = 0.1f;
             float inputMagnitude = _input.analogMovement ? _input.move.magnitude : 1f;
 
-            // accelerate or decelerate to target speed
+            // accelerate or decelerate
             if (currentHorizontalSpeed < targetSpeed - speedOffset ||
                 currentHorizontalSpeed > targetSpeed + speedOffset)
             {
-                // creates curved result rather than a linear one giving a more organic speed change
-                // note T in Lerp is clamped, so we don't need to clamp our speed
                 _speed = Mathf.Lerp(currentHorizontalSpeed, targetSpeed * inputMagnitude,
                     Time.deltaTime * SpeedChangeRate);
 
-                // round speed to 3 decimal places
                 _speed = Mathf.Round(_speed * 1000f) / 1000f;
             }
             else
@@ -350,33 +398,54 @@ namespace StarterAssets
             // normalise input direction
             Vector3 inputDirection = new Vector3(_input.move.x, 0.0f, _input.move.y).normalized;
 
-            // note: Vector2's != operator uses approximation so is not floating point error prone, and is cheaper than magnitude
-            // if there is a move input rotate player when the player is moving
+            // if there is movement input, rotate character
             if (_input.move != Vector2.zero)
             {
-                _targetRotation = Mathf.Atan2(inputDirection.x, inputDirection.z) * Mathf.Rad2Deg +
-                                  _mainCamera.transform.eulerAngles.y;
-                float rotation = Mathf.SmoothDampAngle(transform.eulerAngles.y, _targetRotation, ref _rotationVelocity,
-                    RotationSmoothTime);
+                // 🔥 KEY FIX — support AI world-space movement
+                if (UseWorldSpaceMovement || _mainCamera == null)
+                {
+                    // AI / world space movement
+                    _targetRotation = Mathf.Atan2(inputDirection.x, inputDirection.z) * Mathf.Rad2Deg;
+                }
+                else
+                {
+                    // Player camera-relative movement
+                    _targetRotation = Mathf.Atan2(inputDirection.x, inputDirection.z) * Mathf.Rad2Deg +
+                                    _mainCamera.transform.eulerAngles.y;
+                }
 
-                // rotate to face input direction relative to camera position
+                float rotation = Mathf.SmoothDampAngle(
+                    transform.eulerAngles.y,
+                    _targetRotation,
+                    ref _rotationVelocity,
+                    RotationSmoothTime
+                );
+
                 transform.rotation = Quaternion.Euler(0.0f, rotation, 0.0f);
             }
 
-
             Vector3 targetDirection = Quaternion.Euler(0.0f, _targetRotation, 0.0f) * Vector3.forward;
 
-            // move the player
-            _controller.Move(targetDirection.normalized * (_speed * Time.deltaTime) +
-                             new Vector3(0.0f, _verticalVelocity, 0.0f) * Time.deltaTime);
+            // move character
+            Vector3 moveVector = targetDirection.normalized * (_speed * Time.deltaTime) +
+                new Vector3(0.0f, _verticalVelocity, 0.0f) * Time.deltaTime;
 
-            // update animator if using character
+            if (IsEnemy && DebugMovement && Time.frameCount % 60 == 0)
+            {
+                Debug.Log($"[TPC-ENEMY] Move: Input:{_input.move} TargetDir:{targetDirection} Speed:{_speed} VertVel:{_verticalVelocity} FINAL_VECTOR:{moveVector}");
+                Debug.Log($"[TPC-ENEMY] Controller Enabled:{_controller.enabled} IsGrounded:{_controller.isGrounded} MinMoveDist:{_controller.minMoveDistance}");
+            }
+
+            _controller.Move(moveVector);
+
+            // update animator
             if (_hasAnimator)
             {
                 _animator.SetFloat(_animIDSpeed, _animationBlend);
                 _animator.SetFloat(_animIDMotionSpeed, inputMagnitude);
             }
         }
+
 
         private void JumpAndGravity()
         {
@@ -399,7 +468,7 @@ namespace StarterAssets
                 }
 
                 // Jump
-                if (_input.jump && _jumpTimeoutDelta <= 0.0f)
+                if (_input.jump && _jumpTimeoutDelta <= 0.0f && !_jumpInputProcessed)
                 {
                     // the square root of H * -2 * G = how much velocity needed to reach desired height
                     _verticalVelocity = Mathf.Sqrt(JumpHeight * -2f * Gravity);
@@ -409,12 +478,21 @@ namespace StarterAssets
                     {
                         _animator.SetBool(_animIDJump, true);
                     }
+
+                    // Mark that we've processed this jump input
+                    _jumpInputProcessed = true;
                 }
 
                 // jump timeout
                 if (_jumpTimeoutDelta >= 0.0f)
                 {
                     _jumpTimeoutDelta -= Time.deltaTime;
+                }
+
+                // Reset jump input tracking when jump button is released
+                if (!_input.jump)
+                {
+                    _jumpInputProcessed = false;
                 }
             }
             else
@@ -435,9 +513,6 @@ namespace StarterAssets
                         _animator.SetBool(_animIDFreeFall, true);
                     }
                 }
-
-                // if we are not grounded, do not jump
-                _input.jump = false;
             }
 
             // apply gravity over time if under terminal (multiply by delta time twice to linearly speed up over time)
@@ -459,6 +534,13 @@ namespace StarterAssets
                 return false;
             }
 
+            /* For AI (no camera) or World Space Movement, just check forward alignment based on character forward */
+            if (IsEnemy || UseWorldSpaceMovement || _mainCamera == null)
+            {
+                float moveAlignment = Vector3.Dot(_input.move.normalized, transform.forward);
+                return moveAlignment > 0f;
+            }
+
             /* Convert camera-relative input to world-space direction */
             Vector3 inputDirection = new Vector3(_input.move.x, 0.0f, _input.move.y).normalized;
             Vector3 cameraForward = new Vector3(_mainCamera.transform.forward.x, 0.0f, _mainCamera.transform.forward.z).normalized;
@@ -469,14 +551,14 @@ namespace StarterAssets
             
             /* Check if player is moving roughly forward (within 90 degrees of forward direction) */
             Vector3 playerForward = transform.forward;
-            float forwardAlignment = Vector3.Dot(worldMoveDirection, playerForward);
+            float cameraAlignedMovement = Vector3.Dot(worldMoveDirection, playerForward);
 
-            if (DebugVault)
+            if (DebugVault && IsEnemy)
             {
-                Debug.Log($"[VAULT DEBUG] Movement intent check - Magnitude: {_input.move.magnitude:F2}, World direction: {worldMoveDirection}, Forward alignment: {forwardAlignment:F2}");
+                Debug.Log($"[VAULT DEBUG] Movement intent check - Magnitude: {_input.move.magnitude:F2}, World direction: {worldMoveDirection}, Forward alignment: {cameraAlignedMovement:F2}");
             }
 
-            return forwardAlignment > 0f;
+            return cameraAlignedMovement > 0f;
         }
 
         /// <summary>
@@ -600,9 +682,83 @@ namespace StarterAssets
                 return false;
             }
 
-            /* PATCH 3: Calculate landing position beyond the obstacle */
-            Vector3 landingPositionOnObstacle = downHit.point + Vector3.up * VaultUpwardOffset;
-            vaultLandingPosition = landingPositionOnObstacle + transform.forward * VaultForwardOffset;
+            /* PATCH 3: Scan forward to find the back edge of the obstacle */
+            Vector3 scanStartPoint = downHit.point;
+            Vector3 scanDirection = transform.forward;
+            Vector3 lastValidSurfacePoint = scanStartPoint;
+            bool edgeFound = false;
+            
+            float scanStep = 0.1f;
+            int maxSteps = Mathf.CeilToInt(MaxVaultDepth / scanStep);
+
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Scanning max depth {MaxVaultDepth}m to find back edge...");
+            }
+
+            for (int i = 1; i <= maxSteps; i++)
+            {
+                // Move forward along the top surface
+                Vector3 checkPos = scanStartPoint + (scanDirection * (i * scanStep));
+                // Raycast down from slightly above expected surface height
+                Vector3 rayOrigin = checkPos + Vector3.up * 1.0f; 
+                
+                if (Physics.Raycast(rayOrigin, Vector3.down, out RaycastHit surfaceHit, 2.0f, VaultLayers, QueryTriggerInteraction.Ignore))
+                {
+                    // Still on the obstacle surface
+                    lastValidSurfacePoint = surfaceHit.point;
+                    
+                    // Optional: Check if surface height changed drastically (steep slope or wall)
+                    if (Mathf.Abs(surfaceHit.point.y - scanStartPoint.y) > 0.5f)
+                    {
+                        // If it DROPPED significantly, we found the back edge (e.g. hit the ground)
+                        if (surfaceHit.point.y < scanStartPoint.y)
+                        {
+                            if (DebugVault) Debug.Log($"[VAULT DEBUG] ✓ Back edge found (drop-off) at step {i}");
+                            edgeFound = true;
+                            // The PREVIOUS point was likely the last valid point on the surface
+                            // But we are now past the edge, so we can calculate landing from here or lastValid
+                            break;
+                        }
+                        
+                        // If it went UP significantly, we hit a wall -> invalid
+                        if (DebugVault) Debug.Log($"[VAULT DEBUG] ✗ Surface height rose too much (wall?) at step {i}");
+                        return false; 
+                    }
+                }
+                else
+                {
+                    // Raycast missed! We found the edge.
+                    edgeFound = true;
+                    if (DebugVault) Debug.Log($"[VAULT DEBUG] Back edge found at step {i} ({i*scanStep:F2}m depth)");
+                    break;
+                }
+            }
+
+            if (!edgeFound)
+            {
+                if (DebugVault)
+                {
+                    Debug.Log($"[VAULT DEBUG] ✗ Obstacle too deep! (>{MaxVaultDepth}m)");
+                }
+                return false;
+            }
+
+            // Calculate landing position relative to the back edge
+            vaultLandingPosition = lastValidSurfacePoint + (scanDirection * VaultLandingOffset);
+            
+            // Adjust Y to ground level if needed, or let gravity handle it?
+            // Better to find ground at landing position
+            if (Physics.Raycast(vaultLandingPosition + Vector3.up, Vector3.down, out RaycastHit groundHit, 3.0f, GroundLayers, QueryTriggerInteraction.Ignore))
+            {
+                vaultLandingPosition = groundHit.point;
+            }
+            else
+            {
+                 // If no ground found, landing might be in air/pit? Unsafe.
+                 if (DebugVault) Debug.Log("[VAULT DEBUG] ✗ No ground found at landing position");
+                 return false;
+            }
 
             if (DebugVault)
             {
@@ -679,6 +835,12 @@ namespace StarterAssets
             Vector3 startPosition = transform.position;
             float elapsedTime = 0f;
 
+            if (DebugVault)
+            {
+                Debug.Log($"[VAULT DEBUG] Vault motion: Start {startPosition}, Landing {landingPosition}");
+            }
+
+            /* Execute vault motion for full duration */
             while (elapsedTime < VaultDuration)
             {
                 elapsedTime += Time.deltaTime;
@@ -713,7 +875,7 @@ namespace StarterAssets
             /* Re-enable CharacterController */
             _controller.enabled = true;
 
-            /* Reset vertical velocity for gravity to work properly */
+            /* Reset vertical velocity for gravity to work properly after landing */
             _verticalVelocity = 0f;
 
             _isVaulting = false;

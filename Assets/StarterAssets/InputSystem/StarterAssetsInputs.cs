@@ -5,7 +5,7 @@ using UnityEngine.InputSystem;
 
 namespace StarterAssets
 {
-	public class StarterAssetsInputs : MonoBehaviour
+	public class StarterAssetsInputs : MonoBehaviour, IInputProvider
 	{
 		[Header("Character Input Values")]
 		public Vector2 move;
@@ -20,6 +20,14 @@ namespace StarterAssets
 		[Header("Mouse Cursor Settings")]
 		public bool cursorLocked = true;
 		public bool cursorInputForLook = true;
+
+		// Explicit interface implementation for IInputProvider
+		Vector2 IInputProvider.move => move;
+		Vector2 IInputProvider.look => look;
+		bool IInputProvider.jump => jump;
+		bool IInputProvider.sprint => sprint;
+		bool IInputProvider.vault => vault;
+		bool IInputProvider.analogMovement => analogMovement;
 
 #if ENABLE_INPUT_SYSTEM
 		public void OnMove(InputValue value)
@@ -50,7 +58,6 @@ namespace StarterAssets
 			VaultInput(value.isPressed);
 		}
 #endif
-
 
 		public void MoveInput(Vector2 newMoveDirection)
 		{
