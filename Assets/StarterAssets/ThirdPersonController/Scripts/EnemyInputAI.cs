@@ -25,6 +25,8 @@ namespace StarterAssets
 
         [Header("AI Input - Chase")]
         [SerializeField] private float _lastKnownPositionTimeout = 5.0f;
+        [SerializeField] private float _attackDistance = 2.0f;
+        [SerializeField] private float _sprintDistance = 8.0f;
 
         [Header("Debug")]
         [SerializeField] private bool _debugDrawSight = false;
@@ -147,9 +149,8 @@ namespace StarterAssets
                  }
             }
 
-            // Reset one-shot inputs
+            // Reset one-shot inputs (sprint is a state, handled by behaviors)
             _jumpInput = false;
-            _sprintInput = false;
             _vaultInput = false;
         }
 
@@ -277,7 +278,29 @@ namespace StarterAssets
         /// </summary>
         private void ChaseBehavior()
         {
-            _sprintInput = true;
+            float distanceToPlayer = Vector3.Distance(transform.position, _playerTransform.position);
+
+            // If within attack range, stop moving and face player
+            if (distanceToPlayer <= _attackDistance)
+            {
+                _moveInput = Vector2.zero;
+                _sprintInput = false;
+                
+                // Face the player directly
+                Vector3 direction = (_playerTransform.position - transform.position).normalized;
+                direction.y = 0;
+                if (direction != Vector3.zero)
+                {
+                    transform.rotation = Quaternion.Slerp(transform.rotation, Quaternion.LookRotation(direction), Time.deltaTime * 10f);
+                }
+                
+                return;
+            }
+
+
+
+            // Sprint only if far away
+            _sprintInput = distanceToPlayer > _sprintDistance;
 
             _pathUpdateTimer -= Time.deltaTime;
             if (_pathUpdateTimer <= 0f)
@@ -427,11 +450,20 @@ namespace StarterAssets
                 }
             }
 
-            // Draw last known position
-            if (_currentState == AIState.SearchingLastKnown)
+            // Draw GREEN Sphere if Player is currently SEEN
+            if (Application.isPlaying && CanSeePlayer())
+            {
+                Gizmos.color = Color.green;
+                Gizmos.DrawSphere(_playerTransform.position + Vector3.up * 1.5f, 0.4f);
+            }
+
+            // Draw RED Sphere at Last Known Position (Memory)
+            if (_currentState == AIState.Chasing || _currentState == AIState.SearchingLastKnown)
             {
                 Gizmos.color = Color.red;
-                Gizmos.DrawWireSphere(_lastKnownPlayerPosition, 0.3f);
+                Gizmos.DrawSphere(_lastKnownPlayerPosition + Vector3.up * 1.5f, 0.4f);
+                // Draw line from current pos to last known
+                Gizmos.DrawLine(transform.position + Vector3.up, _lastKnownPlayerPosition + Vector3.up * 1.5f);
             }
         }
     }

@@ -623,17 +623,33 @@ namespace FischlWorks
                 return;
             }
 
-            float minFootHeight = Mathf.Min(
-                    playerAnimator.GetIKPosition(AvatarIKGoal.LeftFoot).y,
-                    playerAnimator.GetIKPosition(AvatarIKGoal.RightFoot).y);
-
-            /* This part moves the body 'downwards' by the root gameobject's height */
-
-            playerAnimator.bodyPosition = new Vector3(
-            playerAnimator.bodyPosition.x,
-            playerAnimator.bodyPosition.y +
-            LimitValueByRange(minFootHeight - transform.position.y, 0),
-            playerAnimator.bodyPosition.z);
+            // Find the lowest foot position (Target Y for IK)
+            float leftFootY = playerAnimator.GetIKPosition(AvatarIKGoal.LeftFoot).y;
+            float rightFootY = playerAnimator.GetIKPosition(AvatarIKGoal.RightFoot).y;
+            
+            float minFootHeight = Mathf.Min(leftFootY, rightFootY);
+            
+            // Calculate the height difference between the lowest foot and the transform root
+            float heightOffset = minFootHeight - transform.position.y;
+            
+            // To prevent 'floating', we must lower the hips if the feet are finding ground below us due to slope/stairs.
+            // We ignore upward movement here (offset > 0) to avoid popping, unless extreme.
+            // Or we apply full offset? Let's apply full offset to be robust for uneven ground.
+            
+            // Optional: Clamp offset to reasonable limits to avoid collapsing entirely
+            // heightOffset = Mathf.Max(heightOffset, -0.7f); // Don't drop more than 0.7m
+            
+            // Apply smoothly to prevent jittering on rapid slope changes
+            // But for now, direct application to fix the issue clearly.
+            
+            if (heightOffset < 0)
+            {
+                // Only lower the hips (negative offset), never raise them artificially above standard idle.
+                // This ensures we sit INTO the slope rather than float above it.
+                Vector3 currentBodyPos = playerAnimator.bodyPosition;
+                currentBodyPos.y += heightOffset;
+                playerAnimator.bodyPosition = currentBodyPos;
+            }
         }
 
 

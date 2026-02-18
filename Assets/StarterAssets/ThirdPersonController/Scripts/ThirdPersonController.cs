@@ -151,7 +151,8 @@ namespace StarterAssets
         private int _animIDVault;
 
         // vault state
-        private bool _isVaulting = false;
+        private bool _isVaultingRef = false;
+        public bool IsVaulting => _isVaultingRef; // Expose for IK
 
         // jump state tracking
         private bool _jumpInputProcessed = false;
@@ -263,7 +264,7 @@ namespace StarterAssets
             GroundedCheck();
 
             /* PATCH 1: Check for vault attempt before normal movement with movement intent validation */
-            if (Grounded && _input.vault && !_isVaulting)
+            if (Grounded && _input.vault && !_isVaultingRef)
             {
                 Vector3 vaultLandingPosition;
                 
@@ -363,7 +364,7 @@ namespace StarterAssets
         private void Move()
         {
             /* PATCH 2: Skip movement input during vault */
-            if (_isVaulting)
+            if (_isVaultingRef)
                 return;
 
             // set target speed based on move speed, sprint speed and if sprint is pressed
@@ -812,7 +813,7 @@ namespace StarterAssets
         /// </summary>
         private IEnumerator PerformVault(Vector3 landingPosition)
         {
-            _isVaulting = true;
+            _isVaultingRef = true;
 
             if (DebugVault)
             {
@@ -878,7 +879,7 @@ namespace StarterAssets
             /* Reset vertical velocity for gravity to work properly after landing */
             _verticalVelocity = 0f;
 
-            _isVaulting = false;
+            _isVaultingRef = false;
 
             if (DebugVault)
             {
