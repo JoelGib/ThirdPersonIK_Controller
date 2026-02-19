@@ -24,7 +24,7 @@ namespace StarterAssets
 		// Explicit interface implementation for IInputProvider
 		Vector2 IInputProvider.move => move;
 		Vector2 IInputProvider.look => look;
-		bool IInputProvider.jump => jump;
+		bool IInputProvider.jump { get => jump; set => jump = value; }
 		bool IInputProvider.sprint => sprint;
 		bool IInputProvider.vault => vault;
 		bool IInputProvider.analogMovement => analogMovement;

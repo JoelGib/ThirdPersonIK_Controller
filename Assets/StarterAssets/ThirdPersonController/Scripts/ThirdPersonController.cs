@@ -154,8 +154,8 @@ namespace StarterAssets
         private bool _isVaultingRef = false;
         public bool IsVaulting => _isVaultingRef; // Expose for IK
 
-        // jump state tracking
-        private bool _jumpInputProcessed = false;
+
+
 
         // vault gizmo debug data
         private List<RaycastHit> _lastVaultForwardHits = new List<RaycastHit>();
@@ -469,7 +469,7 @@ namespace StarterAssets
                 }
 
                 // Jump
-                if (_input.jump && _jumpTimeoutDelta <= 0.0f && !_jumpInputProcessed)
+                if (_input.jump && _jumpTimeoutDelta <= 0.0f)
                 {
                     // the square root of H * -2 * G = how much velocity needed to reach desired height
                     _verticalVelocity = Mathf.Sqrt(JumpHeight * -2f * Gravity);
@@ -480,20 +480,14 @@ namespace StarterAssets
                         _animator.SetBool(_animIDJump, true);
                     }
 
-                    // Mark that we've processed this jump input
-                    _jumpInputProcessed = true;
+                    // Consume the jump input so it doesn't fire again
+                    _input.jump = false;
                 }
 
                 // jump timeout
                 if (_jumpTimeoutDelta >= 0.0f)
                 {
                     _jumpTimeoutDelta -= Time.deltaTime;
-                }
-
-                // Reset jump input tracking when jump button is released
-                if (!_input.jump)
-                {
-                    _jumpInputProcessed = false;
                 }
             }
             else

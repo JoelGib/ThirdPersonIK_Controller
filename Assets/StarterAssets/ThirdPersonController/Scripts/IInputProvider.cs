@@ -15,7 +15,7 @@ namespace StarterAssets
         Vector2 look { get; }
 
         /// <summary>Jump input flag</summary>
-        bool jump { get; }
+        bool jump { get; set; }
 
         /// <summary>Sprint input flag</summary>
         bool sprint { get; }

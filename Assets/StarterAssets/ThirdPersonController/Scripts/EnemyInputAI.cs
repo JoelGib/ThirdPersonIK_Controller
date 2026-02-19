@@ -62,7 +62,7 @@ namespace StarterAssets
         // IInputProvider properties
         public Vector2 move => _moveInput;
         public Vector2 look => _lookInput;
-        public bool jump => _jumpInput;
+        public bool jump { get => _jumpInput; set => _jumpInput = value; }
         public bool sprint => _sprintInput;
         public bool vault => _vaultInput;
         public bool analogMovement => true; // AI uses analog movement for smooth pathing
