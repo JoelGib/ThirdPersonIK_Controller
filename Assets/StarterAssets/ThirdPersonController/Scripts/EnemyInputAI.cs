@@ -64,7 +64,7 @@ namespace StarterAssets
         public Vector2 look => _lookInput;
         public bool jump { get => _jumpInput; set => _jumpInput = value; }
         public bool sprint => _sprintInput;
-        public bool vault => _vaultInput;
+        public bool vault { get => _vaultInput; set => _vaultInput = value; }
         public bool analogMovement => true; // AI uses analog movement for smooth pathing
 
         private void Awake()

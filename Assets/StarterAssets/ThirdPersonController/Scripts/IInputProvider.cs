@@ -21,7 +21,7 @@ namespace StarterAssets
         bool sprint { get; }
 
         /// <summary>Vault input flag</summary>
-        bool vault { get; }
+        bool vault { get; set; }
 
         /// <summary>Whether movement uses analog stick magnitude or binary movement</summary>
         bool analogMovement { get; }

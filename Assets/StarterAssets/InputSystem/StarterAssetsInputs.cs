@@ -26,7 +26,7 @@ namespace StarterAssets
 		Vector2 IInputProvider.look => look;
 		bool IInputProvider.jump { get => jump; set => jump = value; }
 		bool IInputProvider.sprint => sprint;
-		bool IInputProvider.vault => vault;
+		bool IInputProvider.vault { get => vault; set => vault = value; }
 		bool IInputProvider.analogMovement => analogMovement;
 
 #if ENABLE_INPUT_SYSTEM
